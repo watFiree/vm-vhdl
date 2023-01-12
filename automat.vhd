@@ -1,13 +1,15 @@
 library IEEE;
 use IEEE.STD_LOGIC_1164.ALL;
+use ieee.numeric_std.all;
 
 entity automat2 is
   port(
     clk: in std_logic;
     reset: in std_logic;
+	 reset_product: in std_logic;
     coin: in std_logic; -- wrzucanie pieniedzy, jak jest slider w gore to klikiem dodajemy
-    dispense: out std_logic; -- sygnal czy zrobiono
-	 error_output_code: out std_logic_vector(1 downto 0);
+    dispense: buffer std_logic; -- sygnal czy zrobiono
+	 error_output_code: buffer std_logic_vector(1 downto 0);
 	 money_left: out std_logic_vector(2 downto 0); -- reszta
     product_selected: in std_logic_vector(2 downto 0); -- sygnal produktu
 	 sugar_selected: in std_logic_vector(1 downto 0) -- sygnal ilosci cukru
@@ -15,7 +17,7 @@ entity automat2 is
 end automat2;
 
 architecture behavior of automat2 is
-  type state_type is (IDLE, SELECT_DRINK, SELECT_SUGAR, INSERT_MONEY, DISPENSE_DRINK, PREPARE_DRINK, DISPENSE_MONEY);
+  type state_type is (IDLE, SELECT_DRINK, SELECT_SUGAR, INSERT_MONEY, CHECK_INGREDIENTS, PREPARE_DRINK, DISPENSE_MONEY);
   type drink_type is (NONE,
   WATER, -- 1 WATER
   ESPRESSO, -- 2 ESSPRESSO, 1 WATER i cukier w zaleznosci od wyboru
@@ -30,7 +32,7 @@ architecture behavior of automat2 is
   type sugar_type is (NONE, LOW, MEDIUM, HIGH);
   type ingredient_type is (WATER, MILK, FOAMED_MILK, SUGAR, CACAO, GREEN_TEA, BLACK_TEA, ESPRESSO);
   type ingredient_types is array (ingredient_type) of integer;
-  type error_code is (LACK_OF_SUGAR, LACK_OF_IGREDIENTS, LACK_OF_MONEY);
+  type error_code is (NONE, LACK_OF_IGREDIENTS, LACK_OF_MONEY);
   type error_codes is array (error_code) of std_logic_vector(1 downto 0);
   signal state: state_type;
   signal coin_count: integer range 0 to 7;
@@ -85,7 +87,7 @@ begin
   variable ingredients_store: ingredient_types := (
    WATER => 1000000, -- nielimitowana ilosc
 	MILK => 8,
-	FOAMED_MILK => 8,
+	FOAMED_MILK => 0, -- dla latte nie da sie zrobic
 	SUGAR => 20,
 	CACAO => 6,
 	GREEN_TEA => 12,
@@ -93,15 +95,19 @@ begin
 	ESPRESSO => 16
   );
   variable error_output_codes: error_codes := (
-   LACK_OF_MONEY => "00",
-	LACK_OF_SUGAR => "01",
-	LACK_OF_IGREDIENTS => "11"
+	NONE => "00",
+   LACK_OF_MONEY => "01",
+	LACK_OF_IGREDIENTS => "10"
   );
   begin
   if (reset = '1') then
     state <= IDLE;
     coin_count <= 0;
 	 selected_drink <= NONE;
+	 sugar_amount <= NONE;
+  elsif (reset_product = '1') then
+    state <= SELECT_DRINK;
+    selected_drink <= NONE;
 	 sugar_amount <= NONE;
   elsif (clk'event and clk = '1') then
     case state is
@@ -112,15 +118,25 @@ begin
         end if;
 		when INSERT_MONEY =>
         if (coin = '1') then
-          state <= INSERT_MONEY;
           coin_count <= coin_count + 1;
-        else
+			 state <= INSERT_MONEY;
+        elsif (error_output_code = error_output_codes(LACK_OF_MONEY) and coin_count < drink_menu(selected_drink)) then
+		    state <= INSERT_MONEY;
+		  else
           state <= SELECT_DRINK;
         end if;
       when SELECT_DRINK =>
         if (coin = '1') then
           state <= INSERT_MONEY;
           coin_count <= coin_count + 1;
+		  elsif (selected_drink /= NONE) then
+		    if (coin_count >= drink_menu(selected_drink)) then
+			   error_output_code <= error_output_codes(NONE);
+				state <= SELECT_SUGAR;
+			 else
+			   error_output_code <= error_output_codes(LACK_OF_MONEY);
+			   state <= INSERT_MONEY;
+			 end if;
         elsif (product_selected /= "UUU") then     
           case product_selected is
 			  when "000" => selected_drink <= WATER;
@@ -133,11 +149,6 @@ begin
            when "111" => selected_drink <= LATTE;
 			  when others => selected_drink <= NONE;
           end case;
-			 if (coin_count >= drink_menu(selected_drink)) then
-				state <= SELECT_SUGAR;
-			 elsif
-			   state <= INSERT_MONEY;
-			 end if;
         end if;
       when SELECT_SUGAR =>
 		  if (sugar_selected /= "UU") then
@@ -147,24 +158,26 @@ begin
               when "10" => sugar_amount <= MEDIUM;
               when "11" => sugar_amount <= HIGH;
 				  when others => sugar_amount <= NONE;
-          end case;
-			 state <= DISPENSE_DRINK;
+				end case;
+				state <= CHECK_INGREDIENTS;
         end if;
-      when DISPENSE_DRINK =>
+      when CHECK_INGREDIENTS =>
 			if(enough_ingredients(selected_drink, sugar_amount, ingredients_store)) then
-				dispense <= '1';
 				state <= PREPARE_DRINK;
-			elsif
+			else
 				error_output_code <= error_output_codes(LACK_OF_IGREDIENTS);
 				dispense <= '0';
 				state <= DISPENSE_MONEY;
 			end if;
 		when PREPARE_DRINK => 
 			-- tu cos trza pokazac lub chuj wie co
+			-- wait for 200 ns;
+			dispense <= '1';
+			state <= DISPENSE_MONEY;
 		when DISPENSE_MONEY =>
-			if(dispense = '0') then
+			if (dispense = '0') then
 			  money_left <= std_logic_vector(to_unsigned(coin_count, 3));
-			elsif
+			else
 			  money_left <= std_logic_vector(to_unsigned(drink_menu(selected_drink) - coin_count, 3));
 			end if;
 		end case;
