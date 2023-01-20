@@ -3,21 +3,36 @@ use IEEE.STD_LOGIC_1164.ALL;
 use ieee.numeric_std.all;
 
 entity automat2 is
-  port(
+   port(
     clk: in std_logic;
     reset: in std_logic;
 	 reset_product: in std_logic;
-    coin: in std_logic; -- wrzucanie pieniedzy, jak jest slider w gore to klikiem dodajemy
-    dispense: buffer std_logic; -- sygnal czy zrobiono
+	 withdraw_money: in std_logic;
+	 blik: in std_logic;
+	 blik_status: in std_logic;
+    coin: in std_logic;
+	 coin_value_vector: in std_logic_vector(2 downto 0);
+    dispense: buffer std_logic;
 	 error_output_code: buffer std_logic_vector(1 downto 0);
-	 money_left: out std_logic_vector(2 downto 0); -- reszta
-    product_selected: in std_logic_vector(2 downto 0); -- sygnal produktu
-	 sugar_selected: in std_logic_vector(1 downto 0) -- sygnal ilosci cukru
+    product_selected: in std_logic_vector(2 downto 0);
+	 sugar_selected: in std_logic_vector(1 downto 0);
+	 coin5_out: out integer;
+	 coin2_out: out integer;
+	 coin1_out: out integer;
+	 product_hex: out std_logic_vector(6 downto 0);
+	 change_hex: out std_logic_vector(6 downto 0);
+	 money_hex: out std_logic_vector(6 downto 0)
   );
 end automat2;
 
 architecture behavior of automat2 is
-  type state_type is (IDLE, SELECT_DRINK, SELECT_SUGAR, INSERT_MONEY, CHECK_INGREDIENTS, PREPARE_DRINK, DISPENSE_MONEY);
+	component seven_seg is
+        port (
+            input_hex: in std_logic_vector(3 downto 0);
+            output_hex: out std_logic_vector(6 downto 0)
+        );
+    end component;
+  type state_type is (IDLE, SELECT_DRINK, SELECT_SUGAR, INSERT_MONEY, CHECK_INGREDIENTS, BLIK_PAYMENT, PREPARE_DRINK, DISPENSE_MONEY, DROP_COINS);
   type drink_type is (NONE,
   WATER, -- 1 WATER
   ESPRESSO, -- 2 ESSPRESSO, 1 WATER i cukier w zaleznosci od wyboru
@@ -32,16 +47,28 @@ architecture behavior of automat2 is
   type sugar_type is (NONE, LOW, MEDIUM, HIGH);
   type ingredient_type is (WATER, MILK, FOAMED_MILK, SUGAR, CACAO, GREEN_TEA, BLACK_TEA, ESPRESSO);
   type ingredient_types is array (ingredient_type) of integer;
-  type error_code is (NONE, LACK_OF_IGREDIENTS, LACK_OF_MONEY);
+  type error_code is (NONE, LACK_OF_IGREDIENTS, LACK_OF_MONEY, LIMIT_OF_MONEY);
   type error_codes is array (error_code) of std_logic_vector(1 downto 0);
   signal state: state_type;
-  signal coin_count: integer range 0 to 7;
+  signal coin_count: integer range 0 to 15;
+  signal coin_value: integer range 0 to 5;
+  type coin_magazine_type is array (integer range 1 to 5) of integer;
   signal selected_drink: drink_type;
   signal sugar_amount: sugar_type;
+  signal should_withdraw_money: std_logic;
+  signal hex_product_int : std_logic_vector(3 downto 0);
+  signal hex_money_int : std_logic_vector(3 downto 0);
+  signal hex_change_int : std_logic_vector(3 downto 0);
   
-  function enough_ingredients(selected_drink: drink_type; sugar_amount: sugar_type; ingredients_store: ingredient_types) return boolean is
-  variable needed_ingredients: ingredient_types;
-  begin
+  -- trza ogarnac nadpisywanie bo tu nie ma referencji
+  procedure check_and_substract_ingredients(
+    selected_drink : in drink_type;
+    sugar_amount : in sugar_type;
+    ingredients_store : inout ingredient_types;
+    enough_ingredients : out boolean
+) is
+    variable needed_ingredients : ingredient_types;
+	begin
     case selected_drink is
       when WATER => needed_ingredients(WATER) := 1;
       when ESPRESSO => needed_ingredients(WATER) := 1; needed_ingredients(ESPRESSO) := 1;
@@ -63,18 +90,33 @@ architecture behavior of automat2 is
     end case;
     
     -- Check if there are enough ingredients in the store
+    enough_ingredients := true;
     for i in needed_ingredients'range loop
       if ingredients_store(i) < needed_ingredients(i) then
-        return false;
+        enough_ingredients := false;
+        return;
       end if;
     end loop;
-    return true;
-  end enough_ingredients;
+    -- Substract the ingredients from the store
+    for i in needed_ingredients'range loop
+        ingredients_store(i) := ingredients_store(i) - needed_ingredients(i);
+    end loop;
+end procedure;
   
 begin
-  process(clk, reset)
+  hex1: seven_seg port map (input_hex => hex_product_int, output_hex => product_hex);
+  hex2: seven_seg port map (input_hex => hex_change_int, output_hex => change_hex);
+  hex3: seven_seg port map (input_hex => hex_money_int, output_hex => money_hex);
+  process(clk, reset, reset_product)
+  variable loop_iterations: integer := 0;
+  variable coin5_change: integer := 0;
+  variable coin2_change: integer := 0;
+  variable coin1_change: integer := 0;
+  variable change_left: integer := 0;
+  variable has_enough_ingredients: boolean;
+
   variable drink_menu: drink_prices := (
-   NONE => 1000,
+   NONE => 15,
 	ESPRESSO => 4,
 	GREEN_TEA => 3,
 	CHOCOLATE => 3,
@@ -87,7 +129,7 @@ begin
   variable ingredients_store: ingredient_types := (
    WATER => 1000000, -- nielimitowana ilosc
 	MILK => 8,
-	FOAMED_MILK => 0, -- dla latte nie da sie zrobic
+	FOAMED_MILK => 1, -- dla latte nie da sie zrobic
 	SUGAR => 20,
 	CACAO => 6,
 	GREEN_TEA => 12,
@@ -97,38 +139,71 @@ begin
   variable error_output_codes: error_codes := (
 	NONE => "00",
    LACK_OF_MONEY => "01",
-	LACK_OF_IGREDIENTS => "10"
+	LACK_OF_IGREDIENTS => "10",
+	LIMIT_OF_MONEY => "11"
+  );
+  variable coins_magazine: coin_magazine_type := (
+	5 => 3,
+	4 => 0,
+	3 => 0,
+	2 => 1,
+	1 => 4
   );
   begin
   if (reset = '1') then
     state <= IDLE;
+	 dispense <= 'U';
     coin_count <= 0;
+	 coin_value <= 0;
 	 selected_drink <= NONE;
 	 sugar_amount <= NONE;
   elsif (reset_product = '1') then
     state <= SELECT_DRINK;
     selected_drink <= NONE;
 	 sugar_amount <= NONE;
+  elsif (withdraw_money = '1') then
+	should_withdraw_money <= '1';
+	state <= DISPENSE_MONEY;
   elsif (clk'event and clk = '1') then
     case state is
       when IDLE =>
-        if (coin = '1') then
+        if (coin = '1' or blik = '1') then
           state <= INSERT_MONEY;
-          coin_count <= coin_count + 1;
+		  elsif (product_selected /= "UUU") then
+			 state <= SELECT_DRINK;
         end if;
 		when INSERT_MONEY =>
         if (coin = '1') then
-          coin_count <= coin_count + 1;
-			 state <= INSERT_MONEY;
+			 case coin_value_vector is
+           when "001" => coin_value <= 1;
+           when "010" => coin_value <= 2;
+			  when "101" => coin_value <= 5;
+			  when others => coin_value <= 0;
+          end case;
+			 
+			 if (coin_value > 0) then
+				if (coin_count + coin_value > 15) then 
+					error_output_code <= error_output_codes(LIMIT_OF_MONEY);
+					state <= DISPENSE_MONEY;
+				else
+					coin_count <= coin_count + coin_value;
+					coins_magazine(coin_value) := coins_magazine(coin_value) + 1;
+					coin_value <= 0;
+					hex_money_int <= std_logic_vector(to_unsigned(coin_count, 4));
+					state <= INSERT_MONEY;
+				end if;
+			 end if;
+		  elsif (blik = '1') then
+			 coin_count <= drink_menu(selected_drink);
+			 state <= SELECT_DRINK;
         elsif (error_output_code = error_output_codes(LACK_OF_MONEY) and coin_count < drink_menu(selected_drink)) then
 		    state <= INSERT_MONEY;
 		  else
           state <= SELECT_DRINK;
         end if;
       when SELECT_DRINK =>
-        if (coin = '1') then
+        if (coin = '1' or (blik = '1' and coin_count = 0)) then
           state <= INSERT_MONEY;
-          coin_count <= coin_count + 1;
 		  elsif (selected_drink /= NONE) then
 		    if (coin_count >= drink_menu(selected_drink)) then
 			   error_output_code <= error_output_codes(NONE);
@@ -149,6 +224,8 @@ begin
            when "111" => selected_drink <= LATTE;
 			  when others => selected_drink <= NONE;
           end case;
+			 
+			 hex_product_int <= std_logic_vector(to_unsigned(drink_menu(selected_drink), 4));
         end if;
       when SELECT_SUGAR =>
 		  if (sugar_selected /= "UU") then
@@ -162,23 +239,92 @@ begin
 				state <= CHECK_INGREDIENTS;
         end if;
       when CHECK_INGREDIENTS =>
-			if(enough_ingredients(selected_drink, sugar_amount, ingredients_store)) then
-				state <= PREPARE_DRINK;
+			check_and_substract_ingredients(selected_drink, sugar_amount, ingredients_store, has_enough_ingredients);
+			if(has_enough_ingredients) then
+				if (blik = '1') then
+					state <= BLIK_PAYMENT;
+				else
+					state <= PREPARE_DRINK;
+				end if;
 			else
 				error_output_code <= error_output_codes(LACK_OF_IGREDIENTS);
 				dispense <= '0';
 				state <= DISPENSE_MONEY;
 			end if;
+		when BLIK_PAYMENT =>	
+			if (blik_status = '1') then
+				dispense <= '1';
+				state <= DISPENSE_MONEY;
+			else
+				error_output_code <= error_output_codes(LACK_OF_MONEY);
+				dispense <= '0';
+				state <= DISPENSE_MONEY;
+			end if;
 		when PREPARE_DRINK => 
-			-- tu cos trza pokazac lub chuj wie co
-			-- wait for 200 ns;
 			dispense <= '1';
 			state <= DISPENSE_MONEY;
 		when DISPENSE_MONEY =>
-			if (dispense = '0') then
-			  money_left <= std_logic_vector(to_unsigned(coin_count, 3));
+			if (error_output_code = error_output_codes(LIMIT_OF_MONEY)) then 
+				change_left := coin_value;
+				coin_value <= 0;
+				state <= DROP_COINS;
+			elsif (blik = '1') then
+				coin_count <= 0;
+				change_left := 0;
+			elsif (dispense = '0' or should_withdraw_money = '1') then
+			  change_left := coin_count;
+			  coin_count <= 0;
+			  coin_value <= 0;
+			  state <= DROP_COINS;
 			else
-			  money_left <= std_logic_vector(to_unsigned(drink_menu(selected_drink) - coin_count, 3));
+			  change_left := coin_count - drink_menu(selected_drink);
+			  state <= DROP_COINS;
+			end if;
+		when DROP_COINS =>
+				hex_change_int <= std_logic_vector(to_unsigned(change_left, 4));
+				loop_iterations := 0;
+				while (change_left > 0 and coins_magazine(5) > 0 and change_left - 5 >= 0) loop
+					if (loop_iterations = 10) then
+						exit;
+					end if;
+					loop_iterations := loop_iterations + 1;
+					coin5_change := coin5_change + 1;
+					change_left := change_left - 5;
+					coins_magazine(5) := coins_magazine(5) - 1;
+				end loop;
+
+				loop_iterations := 0;
+				while (change_left > 0 and coins_magazine(2) > 0 and change_left - 2 >= 0) loop
+					if (loop_iterations = 10) then
+						exit;
+					end if;
+					loop_iterations := loop_iterations + 1;
+					coin2_change := coin2_change + 1;
+					change_left := change_left - 2;
+					coins_magazine(2) := coins_magazine(2) - 1;
+				end loop;
+
+				loop_iterations := 0;
+				while (change_left > 0 and coins_magazine(1) > 0 and change_left - 1 >= 0) loop
+					if (loop_iterations = 10) then
+						exit;
+					end if;
+					loop_iterations := loop_iterations + 1;
+					coin1_change := coin1_change + 1;
+					change_left := change_left - 1;
+					coins_magazine(1) := coins_magazine(1) - 1;
+				end loop;
+				
+			coin5_out <= coin5_change;
+			coin2_out <= coin2_change;
+			coin1_out <= coin1_change;
+			
+			if (should_withdraw_money = '1') then
+				should_withdraw_money <= '0';
+				state <= INSERT_MONEY;
+			elsif (error_output_code = error_output_codes(LIMIT_OF_MONEY)) then
+				error_output_code <= error_output_codes(NONE);
+				state <= INSERT_MONEY;
 			end if;
 		end case;
   end if;
